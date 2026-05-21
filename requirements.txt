@@ -1,0 +1,4 @@
+flask
+deap
+numpy
+requests

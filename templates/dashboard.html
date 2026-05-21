@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MEC Optimization Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .auto-pulse { 
+            border: 2px solid #198754 !important; 
+            box-shadow: 0 0 15px rgba(25, 135, 84, 0.3);
+            transition: all 0.3s ease;
+        }
+        .table-success-fade {
+            animation: highlight 2s ease-out;
+        }
+        @keyframes highlight {
+            from { background-color: #d1e7dd; }
+            to { background-color: transparent; }
+        }
+        #paretoChart { min-height: 300px; }
+    </style>
+</head>
+<body class="bg-light" onload="loadHistory()">
+    <div class="container py-5">
+        <h2 class="mb-4">MEC Multi-Objective Optimizer</h2>
+        
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="card shadow-sm p-3 mb-3" id="controlCard">
+                    <h5>Simulation Controls</h5>
+                    
+                    <div class="form-check form-switch mb-3 mt-3">
+                        <input class="form-check-input" type="checkbox" id="autoToggle" onchange="toggleAutoMode()">
+                        <label class="form-check-label fw-bold" for="autoToggle">Automatic Mode</label>
+                    </div>
+                    <div id="statusIndicator" class="badge bg-secondary mb-3 w-100 p-2">Status: Manual Control</div>
+                    
+                    <hr>
+
+                    <label class="form-label">Tasks: <span id="taskVal">15</span></label>
+                    <input type="range" id="tasks" class="form-range" min="5" max="100" value="15" oninput="document.getElementById('taskVal').innerText=this.value">
+                    
+                    <label class="form-label">Congestion: <span id="congVal">0.5</span></label>
+                    <input type="range" id="congestion" class="form-range" min="0" max="1" step="0.1" value="0.5" oninput="document.getElementById('congVal').innerText=this.value">
+                    
+                    <button onclick="updateDashboard()" class="btn btn-primary w-100 mt-3" id="runBtn">Run MOEA/D</button>
+                </div>
+            </div>
+
+            <div class="col-md-8">
+                <div class="card shadow-sm p-3 h-100">
+                    <h5>Pareto Front (Latency vs Energy)</h5>
+                    <div class="chart-container" style="position: relative; height:100%; width:100%">
+                        <canvas id="paretoChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="card shadow-sm p-4">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5>Optimization History (SQLite)</h5>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="loadHistory()">Refresh Table</button>
+                    </div>
+                    <div class="table-responsive mt-3">
+                        <table class="table table-hover">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Timestamp</th>
+                                    <th>Tasks</th>
+                                    <th>Congestion</th>
+                                    <th>Avg Latency (s)</th>
+                                    <th>Avg Energy (J)</th>
+                                    <th>Sols</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let myChart;
+        let autoInterval = null;
+        let lastHistoryId = null;
+
+        async function toggleAutoMode() {
+            const indicator = document.getElementById('statusIndicator');
+            const runBtn = document.getElementById('runBtn');
+            const card = document.getElementById('controlCard');
+
+            try {
+                const res = await fetch('/toggle-auto', { method: 'POST' });
+                const data = await res.json();
+
+                if (data.auto_mode) {
+                    indicator.className = "badge bg-success mb-3 w-100 p-2 text-white";
+                    indicator.innerText = "Status: Auto (Updating every 5s)";
+                    runBtn.disabled = true;
+                    card.classList.add('auto-pulse');
+                    autoInterval = setInterval(loadHistory, 5000);
+                } else {
+                    indicator.className = "badge bg-secondary mb-3 w-100 p-2";
+                    indicator.innerText = "Status: Manual Control";
+                    runBtn.disabled = false;
+                    card.classList.remove('auto-pulse');
+                    if(autoInterval) clearInterval(autoInterval);
+                }
+            } catch (e) {
+                console.error("Failed to toggle mode", e);
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                const res = await fetch('/history');
+                const data = await res.json();
+                const body = document.getElementById('historyBody');
+                
+                if (!data || data.length === 0) return;
+
+                // Check if new data arrived to update chart in auto-mode
+                if (data[0].id !== lastHistoryId && document.getElementById('autoToggle').checked) {
+                    lastHistoryId = data[0].id;
+                    // Trigger a silent update of the dashboard chart
+                    silentChartUpdate();
+                }
+
+                body.innerHTML = data.map((row, index) => `
+                    <tr class="${index === 0 && document.getElementById('autoToggle').checked ? 'table-success-fade' : ''}">
+                        <td>${row.timestamp}</td>
+                        <td>${row.tasks}</td>
+                        <td>${parseFloat(row.congestion).toFixed(2)}</td>
+                        <td>${parseFloat(row.avg_latency).toFixed(3)}</td>
+                        <td>${parseFloat(row.avg_energy).toFixed(3)}</td>
+                        <td>${row.solutions_found}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error("Error loading history", e);
+            }
+        }
+
+        async function silentChartUpdate() {
+            const tasks = document.getElementById('tasks').value;
+            const congestion = document.getElementById('congestion').value;
+            const formData = new FormData();
+            formData.append('tasks', tasks);
+            formData.append('congestion', congestion);
+            
+            // We use the same endpoint but without UI blocking
+            const response = await fetch('/run-optimization', { method: 'POST', body: formData });
+            const data = await response.json();
+            renderChart(data);
+        }
+
+        function renderChart(data) {
+            const chartData = data.map(pt => ({ x: pt.latency, y: pt.energy }));
+            if (myChart) myChart.destroy();
+            
+            const ctx = document.getElementById('paretoChart').getContext('2d');
+            myChart = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: 'Pareto Optimal Front',
+                        data: chartData,
+                        backgroundColor: '#0d6efd',
+                        showLine: true,
+                        borderColor: '#0d6efd',
+                        tension: 0.3,
+                        pointRadius: 5
+                    }]
+                },
+                options: { 
+                    scales: { 
+                        x: { title: { display: true, text: 'Latency (s)' } }, 
+                        y: { title: { display: true, text: 'Energy (J)' } } 
+                    },
+                    responsive: true,
+                    maintainAspectRatio: false
+                }
+            });
+        }
+
+        async function updateDashboard() {
+            const btn = document.getElementById('runBtn');
+            btn.disabled = true; 
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Computing...';
+
+            const formData = new FormData();
+            formData.append('tasks', document.getElementById('tasks').value);
+            formData.append('congestion', document.getElementById('congestion').value);
+
+            try {
+                const response = await fetch('/run-optimization', { method: 'POST', body: formData });
+                const data = await response.json();
+                renderChart(data);
+                await loadHistory();
+            } catch (error) {
+                console.error("Optimization failed:", error);
+            } finally {
+                btn.disabled = false; 
+                btn.innerText = "Run MOEA/D";
+            }
+        }
+    </script>
+</body>
+</html>
